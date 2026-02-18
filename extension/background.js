@@ -6,6 +6,7 @@ const DEFAULT_BACKEND_URL = 'http://localhost:8080';
 // ── State ──────────────────────────────────────────────────────
 let teachState = null;    // { sessionId, workflowName }
 let executeState = null;  // { executionId, workflowId, totalSteps, stepIndex, running }
+let geminiExecutionContext = null; // { runId, sourceTabId, query, workflowName }
 let backendUrl = DEFAULT_BACKEND_URL;
 let userId = 'local-user';
 
@@ -71,6 +72,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case 'EXECUTE_STOP':
       if (executeState) executeState.running = false;
+      if (geminiExecutionContext) {
+        pushGeminiLog('Execution stopped by user.');
+        finishGeminiRun('Execution stopped by user.');
+      }
       executeState = null;
       chrome.storage.session.remove('executeState');
       sendResponse({ ok: true });
@@ -152,9 +157,12 @@ async function runExecuteLoop() {
     const { executionId, stepIndex, totalSteps } = executeState;
 
     if (stepIndex >= totalSteps) {
+      pushGeminiLog('All workflow steps completed.');
       await completeExecution(executionId);
       return;
     }
+
+    pushGeminiLog(`Step ${stepIndex + 1}/${totalSteps}: capturing screenshot.`);
 
     // Notify popup of current step
     notifyPopup({
@@ -173,6 +181,7 @@ async function runExecuteLoop() {
     } catch (err) {
       console.error('[USERS] screenshot error', err);
       notifyPopup({ type: 'EXECUTE_UPDATE', subtype: 'status', text: '⚠ Screenshot failed. Retrying…' });
+      pushGeminiLog(`Step ${stepIndex + 1}: screenshot failed, retrying.`);
       await sleep(2000);
       continue;
     }
@@ -186,6 +195,7 @@ async function runExecuteLoop() {
       });
     } catch (err) {
       console.error('[USERS] /execute/step error', err);
+      pushGeminiLog(`Step ${stepIndex + 1}: backend call failed, retrying.`);
       await sleep(2000);
       continue;
     }
@@ -196,8 +206,10 @@ async function runExecuteLoop() {
       subtype: 'step_update',
       step: { step_index: stepIndex, intent: result.intent ?? '', status: result.recovery_needed ? 'recovering' : 'executing' }
     });
+    pushGeminiLog(`Step ${stepIndex + 1}: ${result.intent ?? 'processing'}.`);
 
     if (result.recovery_needed) {
+      pushGeminiLog(`Step ${stepIndex + 1}: recovery needed - ${result.recovery_question ?? 'clarification requested'}`);
       // Pause loop and wait for recovery
       notifyPopup({
         type: 'EXECUTE_UPDATE',
@@ -216,6 +228,7 @@ async function runExecuteLoop() {
     // Execute the action
     if (result.action) {
       try {
+        pushGeminiLog(`Step ${stepIndex + 1}: executing ${result.action.type} action.`);
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (activeTab) {
           await chrome.tabs.sendMessage(activeTab.id, {
@@ -225,6 +238,7 @@ async function runExecuteLoop() {
         }
       } catch (err) {
         console.error('[USERS] action dispatch error', err);
+        pushGeminiLog(`Step ${stepIndex + 1}: action dispatch failed.`);
       }
     }
 
@@ -237,12 +251,14 @@ async function runExecuteLoop() {
       stepIndex,
       intent: result.intent ?? `Step ${stepIndex + 1}`
     });
+    pushGeminiLog(`Step ${stepIndex + 1}: completed.`);
 
     if (executeState) executeState.stepIndex++;
   }
 }
 
 async function handleRecovery(executionId, stepIndex, resolution) {
+  pushGeminiLog(`Recovery input received for step ${stepIndex + 1}: "${resolution}"`);
   let screenshotB64 = null;
   try {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -263,6 +279,7 @@ async function handleRecovery(executionId, stepIndex, resolution) {
     });
   } catch (err) {
     console.error('[USERS] /execute/recover error', err);
+    pushGeminiLog(`Recovery request failed for step ${stepIndex + 1}.`);
   }
 
   if (executeState) {
@@ -276,6 +293,9 @@ async function completeExecution(executionId) {
   } catch (_) {}
 
   notifyPopup({ type: 'EXECUTE_UPDATE', subtype: 'complete' });
+  if (geminiExecutionContext) {
+    finishGeminiRun(`Workflow "${geminiExecutionContext.workflowName}" completed successfully.`);
+  }
   executeState = null;
   chrome.storage.session.remove('executeState');
 }
@@ -284,65 +304,117 @@ async function completeExecution(executionId) {
 async function handleGeminiAgentRun(query, sourceTab) {
   const sourceTabId = sourceTab?.id;
   if (!sourceTabId) return;
+  if (geminiExecutionContext) {
+    sendTabMessageSafe(sourceTabId, {
+      type: 'GEMINI_AUTOMATION_DONE',
+      runId: `run_${Date.now()}`,
+      query,
+      summary: 'Another Gemini automation run is already in progress.'
+    });
+    return;
+  }
+  if (executeState && executeState.running) {
+    sendTabMessageSafe(sourceTabId, {
+      type: 'GEMINI_AUTOMATION_DONE',
+      runId: `run_${Date.now()}`,
+      query,
+      summary: 'Another execution is already running. Stop it before starting a new one.'
+    });
+    return;
+  }
 
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const logs = [];
-
-  const pushLog = (text) => {
-    const entry = { ts: new Date().toISOString(), text };
-    logs.push(entry);
-    sendTabMessageSafe(sourceTabId, {
-      type: 'GEMINI_AUTOMATION_LOG',
-      runId,
-      query,
-      entry
-    });
+  geminiExecutionContext = {
+    runId,
+    sourceTabId,
+    query,
+    workflowName: ''
   };
 
+  pushGeminiLog(`Received automation task: "${query}"`);
+  let workflows = [];
   try {
-    pushLog(`Received automation task: "${query}"`);
+    const listRes = await apiFetch(`/workflows/${encodeURIComponent(userId)}`, 'GET');
+    workflows = listRes?.workflows || [];
+  } catch (err) {
+    pushGeminiLog('Could not fetch saved workflows from backend.');
+  }
+
+  const matchedWorkflow = findBestWorkflowMatch(query, workflows);
+  if (matchedWorkflow) {
+    geminiExecutionContext.workflowName = matchedWorkflow.workflow_name || 'workflow';
+    pushGeminiLog(`Matched workflow: "${geminiExecutionContext.workflowName}".`);
+    try {
+      const startRes = await apiFetch('/execute/start', 'POST', {
+        workflow_id: matchedWorkflow.workflow_id,
+        user_id: userId
+      });
+      const totalSteps = Number(matchedWorkflow.step_count || 0);
+      if (!startRes?.execution_id || totalSteps <= 0) {
+        throw new Error('Execution start response missing required data');
+      }
+
+      executeState = {
+        executionId: startRes.execution_id,
+        workflowId: matchedWorkflow.workflow_id,
+        totalSteps,
+        stepIndex: 0,
+        running: true
+      };
+      chrome.storage.session.set({ executeState });
+
+      pushGeminiLog(`Started workflow execution with ${totalSteps} step(s).`);
+      runExecuteLoop().catch((err) => {
+        const message = err?.message || String(err);
+        pushGeminiLog(`Execution loop failed: ${message}`);
+        finishGeminiRun(`Workflow failed: ${message}`);
+      });
+      return;
+    } catch (err) {
+      const message = err?.message || String(err);
+      pushGeminiLog(`Failed to start matched workflow: ${message}`);
+    }
+  } else {
+    pushGeminiLog('No matching saved workflow found. Falling back to tab-opening mode.');
+  }
+
+  await runGeminiTabFallback(query, runId);
+}
+
+async function runGeminiTabFallback(query, runId) {
+  pushGeminiLog(`Fallback mode: browsing for "${query}".`);
+  try {
     const startUrl = inferAutomationStartUrl(query);
     const openedTab = await chrome.tabs.create({ url: startUrl, active: true });
-    pushLog(`Opened new tab: ${startUrl}`);
+    pushGeminiLog(`Opened new tab: ${startUrl}`);
 
     await waitForTabComplete(openedTab.id, 25000);
-    pushLog('New tab finished loading.');
+    pushGeminiLog('New tab finished loading.');
 
     if (startUrl.includes('google.com/search')) {
       const clicked = await clickFirstSearchResult(openedTab.id);
       if (clicked) {
-        pushLog('Clicked first search result.');
+        pushGeminiLog('Clicked first search result.');
         try {
           await waitForTabComplete(openedTab.id, 20000);
-          pushLog('Destination page loaded.');
+          pushGeminiLog('Destination page loaded.');
         } catch (_) {
-          pushLog('Result click succeeded, but load wait timed out.');
+          pushGeminiLog('Result click succeeded, but load wait timed out.');
         }
       } else {
-        pushLog('No clickable result found; left search results open.');
+        pushGeminiLog('No clickable result found; left search results open.');
       }
     } else {
-      pushLog('Opened direct target URL from your request.');
+      pushGeminiLog('Opened direct target URL from your request.');
     }
 
     const finalTab = await chrome.tabs.get(openedTab.id).catch(() => null);
     const finalUrl = finalTab?.url || startUrl;
-    const summary = `Done. ${logs.length} steps logged. Final tab: ${finalUrl}`;
-    sendTabMessageSafe(sourceTabId, {
-      type: 'GEMINI_AUTOMATION_DONE',
-      runId,
-      query,
-      summary
-    });
+    finishGeminiRun(`Fallback done. Final tab: ${finalUrl}`, runId);
   } catch (err) {
     const message = err?.message || String(err);
-    pushLog(`Run failed: ${message}`);
-    sendTabMessageSafe(sourceTabId, {
-      type: 'GEMINI_AUTOMATION_DONE',
-      runId,
-      query,
-      summary: `Run failed: ${message}`
-    });
+    pushGeminiLog(`Fallback failed: ${message}`);
+    finishGeminiRun(`Run failed: ${message}`, runId);
   }
 }
 
@@ -360,6 +432,89 @@ function inferAutomationStartUrl(query) {
   }
 
   return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+}
+
+function findBestWorkflowMatch(query, workflows) {
+  if (!Array.isArray(workflows) || workflows.length === 0) return null;
+
+  const normalizedQuery = normalizeWorkflowText(query);
+  if (!normalizedQuery) return null;
+  const queryTokens = tokenizeWorkflowText(normalizedQuery);
+
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (const workflow of workflows) {
+    const workflowName = normalizeWorkflowText(workflow?.workflow_name);
+    if (!workflowName) continue;
+
+    const workflowTokens = tokenizeWorkflowText(workflowName);
+    const sharedTokenCount = workflowTokens.filter((token) => queryTokens.includes(token)).length;
+    const exactMatch = workflowName === normalizedQuery;
+    const containsMatch = normalizedQuery.includes(workflowName) || workflowName.includes(normalizedQuery);
+
+    let score = 0;
+    if (exactMatch) score += 300;
+    if (containsMatch) score += 180;
+    score += sharedTokenCount * 35;
+
+    const significantOverlap = workflowTokens.filter(
+      (token) => token.length >= 4 && queryTokens.includes(token)
+    ).length;
+    score += significantOverlap * 15;
+
+    const isCandidate = exactMatch || containsMatch || sharedTokenCount >= 2 || significantOverlap >= 1;
+    if (!isCandidate) continue;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = workflow;
+    }
+  }
+
+  return best;
+}
+
+function normalizeWorkflowText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeWorkflowText(text) {
+  return normalizeWorkflowText(text)
+    .split(' ')
+    .filter((token) => token.length > 1);
+}
+
+function pushGeminiLog(text) {
+  const context = geminiExecutionContext;
+  if (!context || !context.sourceTabId) return;
+  sendTabMessageSafe(context.sourceTabId, {
+    type: 'GEMINI_AUTOMATION_LOG',
+    runId: context.runId,
+    query: context.query,
+    entry: {
+      text: String(text || ''),
+      timestamp: Date.now()
+    }
+  });
+}
+
+function finishGeminiRun(summary, runIdOverride) {
+  const context = geminiExecutionContext;
+  if (!context) return;
+  if (runIdOverride && context.runId !== runIdOverride) return;
+
+  sendTabMessageSafe(context.sourceTabId, {
+    type: 'GEMINI_AUTOMATION_DONE',
+    runId: context.runId,
+    query: context.query,
+    summary: String(summary || 'Run finished.')
+  });
+  geminiExecutionContext = null;
 }
 
 function waitForTabComplete(tabId, timeoutMs = 20000) {
