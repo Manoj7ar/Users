@@ -15,6 +15,16 @@
   let overlayEl = null;
   let recordingFrameEl = null;
   let recordingFrameStyleEl = null;
+  let geminiDockRoot = null;
+  let geminiDockLogsEl = null;
+  let geminiDockInputEl = null;
+  let geminiDockRunBtnEl = null;
+  let geminiDockStatusEl = null;
+  let geminiDockPanelEl = null;
+  let geminiDockToggleEl = null;
+  let geminiDockObserver = null;
+  let geminiDockPositionRaf = null;
+  const geminiRunLogMap = new Map();
 
   // Recover teach mode state if this content script loads after recording already started.
   try {
@@ -41,6 +51,10 @@
       hideRecordingFrame();
     }
   });
+
+  if (isGeminiChatPage()) {
+    initGeminiAutomationDock();
+  }
 
   // ── TEACH: click listener ─────────────────────────────────────
   document.addEventListener('click', (e) => {
@@ -91,6 +105,16 @@
 
       case 'HIDE_RECOVERY_OVERLAY':
         hideRecoveryOverlay();
+        sendResponse({ ok: true });
+        break;
+
+      case 'GEMINI_AUTOMATION_LOG':
+        handleGeminiAutomationLog(msg);
+        sendResponse({ ok: true });
+        break;
+
+      case 'GEMINI_AUTOMATION_DONE':
+        handleGeminiAutomationDone(msg);
         sendResponse({ ok: true });
         break;
 
@@ -400,6 +424,457 @@
     }
     const existing = document.getElementById('__users_recovery_overlay__');
     if (existing) existing.remove();
+  }
+
+  function isGeminiChatPage() {
+    return /(^|\.)gemini\.google\.com$/i.test(window.location.hostname);
+  }
+
+  function initGeminiAutomationDock() {
+    if (geminiDockRoot || !document.body) return;
+    ensureGeminiDockStyle();
+
+    const root = document.createElement('div');
+    root.id = '__users_gemini_dock__';
+    root.innerHTML = `
+      <button id="__users_gemini_toggle__" class="users-gemini-toggle">USERS Automate</button>
+      <div id="__users_gemini_panel__" class="users-gemini-panel users-hidden">
+        <div class="users-gemini-pill-row">
+          <input id="__users_gemini_input__" class="users-gemini-input" type="text" placeholder="Describe the task to automate..." />
+          <button id="__users_gemini_run__" class="users-gemini-run">Run</button>
+        </div>
+        <div id="__users_gemini_status__" class="users-gemini-status">
+          Opens a new tab, runs actions, then logs every step here.
+        </div>
+      </div>
+      <div id="__users_gemini_logs__" class="users-gemini-logs users-hidden"></div>
+    `;
+
+    document.body.appendChild(root);
+    geminiDockRoot = root;
+    geminiDockRoot.classList.add('users-gemini-dock-hidden');
+    geminiDockLogsEl = root.querySelector('#__users_gemini_logs__');
+    geminiDockInputEl = root.querySelector('#__users_gemini_input__');
+    geminiDockRunBtnEl = root.querySelector('#__users_gemini_run__');
+    geminiDockStatusEl = root.querySelector('#__users_gemini_status__');
+    geminiDockPanelEl = root.querySelector('#__users_gemini_panel__');
+    geminiDockToggleEl = root.querySelector('#__users_gemini_toggle__');
+
+    geminiDockToggleEl.addEventListener('click', () => {
+      const isHidden = geminiDockPanelEl.classList.contains('users-hidden');
+      geminiDockPanelEl.classList.toggle('users-hidden', !isHidden);
+      if (!geminiDockLogsEl.classList.contains('users-hidden')) {
+        geminiDockLogsEl.classList.remove('users-hidden');
+      }
+      if (isHidden) geminiDockInputEl.focus();
+      requestGeminiDockPositionUpdate();
+    });
+
+    geminiDockInputEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        runGeminiDockTask();
+      }
+    });
+
+    geminiDockRunBtnEl.addEventListener('click', runGeminiDockTask);
+    startGeminiDockPositionTracking();
+    updateGeminiDockPosition();
+  }
+
+  function runGeminiDockTask() {
+    if (!geminiDockInputEl || !geminiDockRunBtnEl) return;
+    const query = (geminiDockInputEl.value || '').trim();
+    if (!query) {
+      setGeminiDockStatus('Enter a task first.', true);
+      geminiDockInputEl.focus();
+      return;
+    }
+
+    setGeminiDockBusy(true);
+    setGeminiDockStatus('Starting automation run…');
+
+    chrome.runtime.sendMessage({ type: 'GEMINI_AGENT_RUN', query }, (response) => {
+      setGeminiDockBusy(false);
+      if (chrome.runtime.lastError) {
+        setGeminiDockStatus(`Failed to start: ${chrome.runtime.lastError.message}`, true);
+        return;
+      }
+      if (!response || !response.ok) {
+        setGeminiDockStatus(`Failed to start: ${(response && response.error) || 'unknown error'}`, true);
+        return;
+      }
+      setGeminiDockStatus('Automation started. Watch live logs below.');
+      geminiDockInputEl.value = '';
+      if (geminiDockLogsEl) geminiDockLogsEl.classList.remove('users-hidden');
+    });
+  }
+
+  function handleGeminiAutomationLog(msg) {
+    if (!isGeminiChatPage()) return;
+    if (!geminiDockRoot) initGeminiAutomationDock();
+    if (!geminiDockLogsEl) return;
+
+    const runId = msg.runId || 'run';
+    const entry = msg.entry || { text: '(no log text)' };
+    const runList = ensureGeminiRunList(runId, msg.query || '');
+
+    const row = document.createElement('div');
+    row.className = 'users-gemini-log-row';
+    row.textContent = entry.text || '';
+    runList.appendChild(row);
+    geminiDockLogsEl.classList.remove('users-hidden');
+    geminiDockLogsEl.scrollTop = geminiDockLogsEl.scrollHeight;
+    requestGeminiDockPositionUpdate();
+  }
+
+  function handleGeminiAutomationDone(msg) {
+    if (!isGeminiChatPage()) return;
+    if (!geminiDockRoot) initGeminiAutomationDock();
+    if (!geminiDockLogsEl) return;
+
+    const runId = msg.runId || 'run';
+    const runList = ensureGeminiRunList(runId, msg.query || '');
+    const row = document.createElement('div');
+    row.className = 'users-gemini-log-row users-gemini-log-final';
+    row.textContent = msg.summary || 'Run finished.';
+    runList.appendChild(row);
+    geminiDockLogsEl.classList.remove('users-hidden');
+    geminiDockLogsEl.scrollTop = geminiDockLogsEl.scrollHeight;
+    setGeminiDockStatus(msg.summary || 'Automation run completed.');
+    requestGeminiDockPositionUpdate();
+  }
+
+  function ensureGeminiRunList(runId, query) {
+    if (geminiRunLogMap.has(runId)) {
+      return geminiRunLogMap.get(runId);
+    }
+    const card = document.createElement('div');
+    card.className = 'users-gemini-run-card';
+    const title = document.createElement('div');
+    title.className = 'users-gemini-run-title';
+    title.textContent = query ? `Task: ${query}` : `Run ${runId.slice(0, 8)}`;
+    const list = document.createElement('div');
+    list.className = 'users-gemini-run-list';
+    card.appendChild(title);
+    card.appendChild(list);
+    geminiDockLogsEl.appendChild(card);
+    geminiRunLogMap.set(runId, list);
+    return list;
+  }
+
+  function setGeminiDockBusy(isBusy) {
+    if (!geminiDockRunBtnEl || !geminiDockInputEl) return;
+    geminiDockRunBtnEl.disabled = !!isBusy;
+    geminiDockInputEl.disabled = !!isBusy;
+    geminiDockRunBtnEl.textContent = isBusy ? 'Running…' : 'Run';
+  }
+
+  function setGeminiDockStatus(text, isError = false) {
+    if (!geminiDockStatusEl) return;
+    geminiDockStatusEl.textContent = text;
+    geminiDockStatusEl.classList.toggle('users-gemini-status-error', !!isError);
+    requestGeminiDockPositionUpdate();
+  }
+
+  function startGeminiDockPositionTracking() {
+    if (!geminiDockRoot || geminiDockObserver) return;
+
+    geminiDockObserver = new MutationObserver(() => {
+      requestGeminiDockPositionUpdate();
+    });
+    geminiDockObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'aria-hidden']
+    });
+
+    window.addEventListener('resize', requestGeminiDockPositionUpdate, { passive: true });
+    window.addEventListener('scroll', requestGeminiDockPositionUpdate, { passive: true, capture: true });
+  }
+
+  function requestGeminiDockPositionUpdate() {
+    if (geminiDockPositionRaf) return;
+    geminiDockPositionRaf = window.requestAnimationFrame(() => {
+      geminiDockPositionRaf = null;
+      updateGeminiDockPosition();
+    });
+  }
+
+  function updateGeminiDockPosition() {
+    if (!geminiDockRoot || !geminiDockToggleEl || !geminiDockPanelEl || !geminiDockLogsEl) return;
+    const anchor = findGeminiComposerAnchor();
+    if (!anchor) {
+      geminiDockRoot.classList.add('users-gemini-dock-hidden');
+      return;
+    }
+
+    geminiDockRoot.classList.remove('users-gemini-dock-hidden');
+    const rect = anchor.getBoundingClientRect();
+    const desiredWidth = Math.min(760, Math.max(360, rect.width));
+    const margin = 10;
+    const horizontalInset = 10;
+    const maxLeft = Math.max(horizontalInset, window.innerWidth - desiredWidth - horizontalInset);
+    const panelLeft = clamp(rect.left + (rect.width / 2) - (desiredWidth / 2), horizontalInset, maxLeft);
+    const panelHeight = geminiDockPanelEl.classList.contains('users-hidden')
+      ? 0
+      : (geminiDockPanelEl.offsetHeight || 62);
+
+    let panelTop = rect.top - panelHeight - margin;
+    if (panelTop < 8) {
+      panelTop = Math.min(window.innerHeight - panelHeight - 8, rect.bottom + margin);
+    }
+
+    geminiDockPanelEl.style.width = `${Math.round(desiredWidth)}px`;
+    geminiDockPanelEl.style.left = `${Math.round(panelLeft)}px`;
+    geminiDockPanelEl.style.top = `${Math.round(Math.max(8, panelTop))}px`;
+
+    const toolsButton = findGeminiToolsButton();
+    const toggleRect = geminiDockToggleEl.getBoundingClientRect();
+    const toggleWidth = Math.max(124, Math.ceil(toggleRect.width || 124));
+    const toggleHeight = Math.max(34, Math.ceil(toggleRect.height || 34));
+    let toggleLeft;
+    let toggleTop;
+
+    if (toolsButton) {
+      const toolsRect = toolsButton.getBoundingClientRect();
+      toggleLeft = clamp(toolsRect.right + 8, 8, window.innerWidth - toggleWidth - 8);
+      toggleTop = clamp(
+        toolsRect.top + (toolsRect.height / 2) - (toggleHeight / 2),
+        8,
+        window.innerHeight - toggleHeight - 8
+      );
+    } else {
+      toggleLeft = clamp(panelLeft + desiredWidth - toggleWidth, 8, window.innerWidth - toggleWidth - 8);
+      toggleTop = clamp(panelTop - toggleHeight - 8, 8, window.innerHeight - toggleHeight - 8);
+    }
+
+    geminiDockToggleEl.style.left = `${Math.round(toggleLeft)}px`;
+    geminiDockToggleEl.style.top = `${Math.round(toggleTop)}px`;
+
+    if (!geminiDockLogsEl.classList.contains('users-hidden')) {
+      const logsTop = Math.min(
+        window.innerHeight - Math.min(geminiDockLogsEl.offsetHeight || 220, 220) - 8,
+        Math.max(8, panelTop + panelHeight + 8)
+      );
+      geminiDockLogsEl.style.width = `${Math.round(desiredWidth)}px`;
+      geminiDockLogsEl.style.left = `${Math.round(panelLeft)}px`;
+      geminiDockLogsEl.style.top = `${Math.round(logsTop)}px`;
+    }
+  }
+
+  function findGeminiComposerAnchor() {
+    const selectors = [
+      'textarea',
+      'div[role="textbox"][contenteditable="true"]',
+      'div[contenteditable="true"][aria-label]',
+      '[contenteditable="true"][data-placeholder]'
+    ];
+    const candidates = [];
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((el) => {
+        if (!isGeminiCandidateVisible(el)) return;
+        candidates.push(el);
+      });
+    });
+    if (!candidates.length) return null;
+
+    const active = document.activeElement;
+    if (active && candidates.includes(active)) {
+      return active;
+    }
+
+    let best = null;
+    let bestScore = -Infinity;
+    candidates.forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      const areaScore = rect.width * Math.max(rect.height, 42);
+      const verticalScore = rect.bottom * 80;
+      const score = areaScore + verticalScore;
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    });
+    return best;
+  }
+
+  function findGeminiToolsButton() {
+    const candidates = [];
+    document.querySelectorAll('button, [role="button"]').forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 28 || rect.height < 20) return;
+      if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+      const label = ((el.innerText || el.textContent || '').trim()).toLowerCase();
+      if (label !== 'tools') return;
+      candidates.push(el);
+    });
+    if (!candidates.length) return null;
+
+    let best = candidates[0];
+    let bestScore = -Infinity;
+    candidates.forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      const score = rect.bottom * 30 + rect.left;
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    });
+    return best;
+  }
+
+  function isGeminiCandidateVisible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 220 || rect.height < 16) return false;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    return true;
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function ensureGeminiDockStyle() {
+    if (document.getElementById('__users_gemini_dock_style__')) return;
+    const style = document.createElement('style');
+    style.id = '__users_gemini_dock_style__';
+    style.textContent = `
+      #__users_gemini_dock__ {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483645;
+        pointer-events: none;
+        font-family: "DM Sans", system-ui, sans-serif;
+        transition: opacity 0.16s ease;
+      }
+
+      #__users_gemini_dock__.users-gemini-dock-hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      #__users_gemini_dock__ .users-hidden {
+        display: none;
+      }
+
+      #__users_gemini_dock__ .users-gemini-toggle {
+        position: fixed;
+        pointer-events: auto;
+        border: 1px solid rgba(154, 160, 166, 0.26);
+        border-radius: 999px;
+        padding: 9px 14px;
+        background: rgba(60, 64, 67, 0.95);
+        color: #e8eaed;
+        font-size: 12px;
+        font-weight: 600;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+        cursor: pointer;
+        transition: top 0.16s ease, left 0.16s ease;
+      }
+
+      #__users_gemini_dock__ .users-gemini-panel {
+        position: fixed;
+        pointer-events: auto;
+        border-radius: 999px;
+        padding: 8px;
+        background: rgba(32, 33, 36, 0.96);
+        border: 1px solid rgba(95, 99, 104, 0.6);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        transition: top 0.16s ease, left 0.16s ease, width 0.16s ease;
+      }
+
+      #__users_gemini_dock__ .users-gemini-pill-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #__users_gemini_dock__ .users-gemini-input {
+        flex: 1;
+        border: 1px solid rgba(95, 99, 104, 0.58);
+        border-radius: 999px;
+        padding: 11px 14px;
+        outline: none;
+        background: rgba(48, 49, 52, 0.94);
+        color: #e8eaed;
+        font-size: 13px;
+      }
+
+      #__users_gemini_dock__ .users-gemini-input::placeholder {
+        color: rgba(189, 193, 198, 0.76);
+      }
+
+      #__users_gemini_dock__ .users-gemini-run {
+        border: 1px solid rgba(95, 99, 104, 0.68);
+        border-radius: 999px;
+        padding: 10px 14px;
+        min-width: 78px;
+        background: rgba(95, 99, 104, 0.95);
+        color: #e8eaed;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      #__users_gemini_dock__ .users-gemini-run:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+
+      #__users_gemini_dock__ .users-gemini-status {
+        margin-top: 7px;
+        padding: 0 10px 2px;
+        color: rgba(189, 193, 198, 0.95);
+        font-size: 11px;
+      }
+
+      #__users_gemini_dock__ .users-gemini-status-error {
+        color: #f28b82;
+      }
+
+      #__users_gemini_dock__ .users-gemini-logs {
+        position: fixed;
+        pointer-events: auto;
+        max-height: 220px;
+        overflow-y: auto;
+        border-radius: 14px;
+        background: rgba(32, 33, 36, 0.97);
+        border: 1px solid rgba(95, 99, 104, 0.62);
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+        padding: 10px;
+        transition: top 0.16s ease, left 0.16s ease, width 0.16s ease;
+      }
+
+      #__users_gemini_dock__ .users-gemini-run-card + .users-gemini-run-card {
+        margin-top: 8px;
+      }
+
+      #__users_gemini_dock__ .users-gemini-run-title {
+        color: #bdc1c6;
+        font-size: 11px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      #__users_gemini_dock__ .users-gemini-log-row {
+        color: #e8eaed;
+        font-size: 12px;
+        line-height: 1.45;
+        margin-bottom: 2px;
+      }
+
+      #__users_gemini_dock__ .users-gemini-log-final {
+        color: #9aa0a6;
+        font-weight: 600;
+      }
+    `;
+    document.documentElement.appendChild(style);
   }
 
   // ── getClickContext ───────────────────────────────────────────

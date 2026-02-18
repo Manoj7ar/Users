@@ -86,6 +86,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       break;
 
+    case 'GEMINI_AGENT_RUN':
+      if (!msg.query || !String(msg.query).trim()) {
+        sendResponse({ ok: false, error: 'Query is required' });
+        break;
+      }
+      handleGeminiAgentRun(String(msg.query), sender.tab).catch((err) => {
+        console.error('[USERS] GEMINI_AGENT_RUN error', err);
+      });
+      sendResponse({ ok: true });
+      break;
+
     default:
       sendResponse({ ok: false, error: 'Unknown message type' });
   }
@@ -270,6 +281,140 @@ async function completeExecution(executionId) {
 }
 
 // ── Verification screenshot (from content.js) ─────────────────
+async function handleGeminiAgentRun(query, sourceTab) {
+  const sourceTabId = sourceTab?.id;
+  if (!sourceTabId) return;
+
+  const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const logs = [];
+
+  const pushLog = (text) => {
+    const entry = { ts: new Date().toISOString(), text };
+    logs.push(entry);
+    sendTabMessageSafe(sourceTabId, {
+      type: 'GEMINI_AUTOMATION_LOG',
+      runId,
+      query,
+      entry
+    });
+  };
+
+  try {
+    pushLog(`Received automation task: "${query}"`);
+    const startUrl = inferAutomationStartUrl(query);
+    const openedTab = await chrome.tabs.create({ url: startUrl, active: true });
+    pushLog(`Opened new tab: ${startUrl}`);
+
+    await waitForTabComplete(openedTab.id, 25000);
+    pushLog('New tab finished loading.');
+
+    if (startUrl.includes('google.com/search')) {
+      const clicked = await clickFirstSearchResult(openedTab.id);
+      if (clicked) {
+        pushLog('Clicked first search result.');
+        try {
+          await waitForTabComplete(openedTab.id, 20000);
+          pushLog('Destination page loaded.');
+        } catch (_) {
+          pushLog('Result click succeeded, but load wait timed out.');
+        }
+      } else {
+        pushLog('No clickable result found; left search results open.');
+      }
+    } else {
+      pushLog('Opened direct target URL from your request.');
+    }
+
+    const finalTab = await chrome.tabs.get(openedTab.id).catch(() => null);
+    const finalUrl = finalTab?.url || startUrl;
+    const summary = `Done. ${logs.length} steps logged. Final tab: ${finalUrl}`;
+    sendTabMessageSafe(sourceTabId, {
+      type: 'GEMINI_AUTOMATION_DONE',
+      runId,
+      query,
+      summary
+    });
+  } catch (err) {
+    const message = err?.message || String(err);
+    pushLog(`Run failed: ${message}`);
+    sendTabMessageSafe(sourceTabId, {
+      type: 'GEMINI_AUTOMATION_DONE',
+      runId,
+      query,
+      summary: `Run failed: ${message}`
+    });
+  }
+}
+
+function inferAutomationStartUrl(query) {
+  const q = String(query || '').trim();
+  const urlMatch = q.match(/https?:\/\/[^\s]+/i);
+  if (urlMatch) return urlMatch[0];
+
+  const openMatch = q.match(/(?:open|go to|visit)\s+([^\s]+)/i);
+  if (openMatch) {
+    const candidate = openMatch[1].trim();
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(candidate)) {
+      return `https://${candidate.replace(/^https?:\/\//i, '')}`;
+    }
+  }
+
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+}
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const startedAt = Date.now();
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      fn(value);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'complete') {
+        finish(resolve);
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+
+    const timer = setInterval(() => {
+      if (settled) {
+        clearInterval(timer);
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        clearInterval(timer);
+        finish(reject, new Error('Tab load timeout'));
+      }
+    }, 250);
+  });
+}
+
+async function clickFirstSearchResult(tabId) {
+  if (!tabId) return false;
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const heading = document.querySelector('#search a h3, a h3');
+        if (!heading) return false;
+        const anchor = heading.closest('a');
+        if (!anchor) return false;
+        anchor.click();
+        return true;
+      }
+    });
+    return !!result?.[0]?.result;
+  } catch (_) {
+    return false;
+  }
+}
 async function handleVerificationScreenshot(msg, tab) {
   if (!executeState) return;
   // Future: send to backend for verification check
@@ -317,3 +462,4 @@ function broadcastTeachModeOn() {
     });
   });
 }
+
