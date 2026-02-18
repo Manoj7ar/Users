@@ -25,8 +25,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (stored.userId) userId = stored.userId;
 
   bindEvents();
-  showScreen('dashboard');
-  loadWorkflows();
+  const session = await chrome.storage.session.get(['teachState']);
+  if (session?.teachState?.sessionId) {
+    restoreTeachSession(session.teachState);
+  } else {
+    showScreen('dashboard');
+    loadWorkflows();
+  }
 });
 
 // ── Screen Routing ─────────────────────────────────────────────
@@ -149,6 +154,23 @@ function resetTeachScreen() {
   currentTranscript = '';
 }
 
+function restoreTeachSession(teachState) {
+  isRecording = true;
+  teachSessionId = teachState.sessionId;
+  stepCount = 0;
+  recognition = null;
+  currentTranscript = '';
+
+  showScreen('teach');
+  document.getElementById('teach-setup').classList.add('hidden');
+  document.getElementById('teach-recording').classList.remove('hidden');
+  document.getElementById('rec-dot').classList.remove('hidden');
+  document.getElementById('step-count').textContent = '0';
+  document.getElementById('teach-progress').style.width = '30%';
+  document.getElementById('teach-status').textContent =
+    'Recording is active. Click in the page. Reopen this popup to Stop & Save.';
+}
+
 async function startRecording() {
   const nameInput = document.getElementById('workflow-name-input');
   const name = nameInput.value.trim();
@@ -182,11 +204,17 @@ async function startRecording() {
   document.getElementById('teach-progress').style.width = '30%';
 
   // Tell background to start capturing clicks
-  chrome.runtime.sendMessage({
-    type: 'TEACH_START',
-    sessionId: teachSessionId,
-    workflowName: name
-  });
+  chrome.runtime.sendMessage(
+    {
+      type: 'TEACH_START',
+      sessionId: teachSessionId,
+      workflowName: name
+    },
+    () => {
+      // Close the popup so the user can immediately interact with the page.
+      window.close();
+    }
+  );
 
   initSpeechRecognition();
 }

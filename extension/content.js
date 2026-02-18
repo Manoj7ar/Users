@@ -13,6 +13,34 @@
   let teachModeActive = false;
   let stepIndex = 0;
   let overlayEl = null;
+  let recordingFrameEl = null;
+  let recordingFrameStyleEl = null;
+
+  // Recover teach mode state if this content script loads after recording already started.
+  try {
+    if (chrome.storage?.session?.get) {
+      chrome.storage.session.get(['teachState'], (stored) => {
+        if (stored?.teachState) {
+          teachModeActive = true;
+          showRecordingFrame();
+        }
+      });
+    }
+  } catch (_) {
+    // Ignore if session storage is not accessible in this context.
+  }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'session' || !changes.teachState) return;
+    if (changes.teachState.newValue) {
+      teachModeActive = true;
+      stepIndex = 0;
+      showRecordingFrame();
+    } else {
+      teachModeActive = false;
+      hideRecordingFrame();
+    }
+  });
 
   // ── TEACH: click listener ─────────────────────────────────────
   document.addEventListener('click', (e) => {
@@ -40,11 +68,13 @@
       case 'TEACH_MODE_ON':
         teachModeActive = true;
         stepIndex = 0;
+        showRecordingFrame();
         sendResponse({ ok: true });
         break;
 
       case 'TEACH_MODE_OFF':
         teachModeActive = false;
+        hideRecordingFrame();
         sendResponse({ ok: true });
         break;
 
@@ -162,6 +192,140 @@
   }
 
   // ── Recovery Overlay ──────────────────────────────────────────
+  function showRecordingFrame() {
+    if (recordingFrameEl) return;
+    ensureRecordingFrameStyle();
+
+    const frame = document.createElement('div');
+    frame.id = '__users_recording_frame__';
+    frame.innerHTML = `
+      <div class="users-recording-glow"></div>
+      <div class="users-recording-edge users-recording-top"></div>
+      <div class="users-recording-edge users-recording-right"></div>
+      <div class="users-recording-edge users-recording-bottom"></div>
+      <div class="users-recording-edge users-recording-left"></div>
+    `;
+    document.documentElement.appendChild(frame);
+    recordingFrameEl = frame;
+  }
+
+  function hideRecordingFrame() {
+    if (recordingFrameEl) {
+      recordingFrameEl.remove();
+      recordingFrameEl = null;
+    }
+    if (recordingFrameStyleEl) {
+      recordingFrameStyleEl.remove();
+      recordingFrameStyleEl = null;
+    }
+  }
+
+  function ensureRecordingFrameStyle() {
+    if (recordingFrameStyleEl) return;
+
+    const style = document.createElement('style');
+    style.id = '__users_recording_frame_style__';
+    style.textContent = `
+      @keyframes users-recording-wave {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+
+      @keyframes users-recording-pulse {
+        0%, 100% {
+          opacity: 0.55;
+          filter: saturate(1) brightness(0.95);
+        }
+        50% {
+          opacity: 0.92;
+          filter: saturate(1.15) brightness(1.08);
+        }
+      }
+
+      @keyframes users-recording-glow-breathe {
+        0%, 100% {
+          opacity: 0.55;
+          box-shadow:
+            inset 0 0 0 1px rgba(104, 170, 255, 0.24),
+            inset 0 0 20px rgba(73, 146, 255, 0.08),
+            0 0 18px rgba(66, 133, 244, 0.1);
+        }
+        50% {
+          opacity: 0.85;
+          box-shadow:
+            inset 0 0 0 1px rgba(121, 182, 255, 0.34),
+            inset 0 0 28px rgba(85, 158, 255, 0.14),
+            0 0 28px rgba(76, 154, 255, 0.16);
+        }
+      }
+
+      #__users_recording_frame__ {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 2147483646;
+      }
+
+      #__users_recording_frame__ .users-recording-glow {
+        position: absolute;
+        inset: 0;
+        border-radius: 0;
+        animation: users-recording-glow-breathe 3.8s ease-in-out infinite;
+      }
+
+      #__users_recording_frame__ .users-recording-edge {
+        position: absolute;
+        background: linear-gradient(
+          110deg,
+          rgba(66, 133, 244, 0.18) 0%,
+          rgba(76, 154, 255, 0.82) 20%,
+          rgba(142, 193, 255, 0.62) 45%,
+          rgba(66, 133, 244, 0.22) 65%,
+          rgba(76, 154, 255, 0.74) 80%,
+          rgba(66, 133, 244, 0.18) 100%
+        );
+        background-size: 260% 260%;
+        animation:
+          users-recording-wave 8s linear infinite,
+          users-recording-pulse 3.3s ease-in-out infinite;
+      }
+
+      #__users_recording_frame__ .users-recording-top,
+      #__users_recording_frame__ .users-recording-bottom {
+        left: 0;
+        right: 0;
+        height: 6px;
+      }
+
+      #__users_recording_frame__ .users-recording-top {
+        top: 0;
+      }
+
+      #__users_recording_frame__ .users-recording-bottom {
+        bottom: 0;
+      }
+
+      #__users_recording_frame__ .users-recording-left,
+      #__users_recording_frame__ .users-recording-right {
+        top: 0;
+        bottom: 0;
+        width: 6px;
+      }
+
+      #__users_recording_frame__ .users-recording-left {
+        left: 0;
+      }
+
+      #__users_recording_frame__ .users-recording-right {
+        right: 0;
+      }
+    `;
+
+    document.documentElement.appendChild(style);
+    recordingFrameStyleEl = style;
+  }
+
   function showRecoveryOverlay(region, question) {
     hideRecoveryOverlay();
 

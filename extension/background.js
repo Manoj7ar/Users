@@ -15,18 +15,26 @@ chrome.storage.local.get(['backendUrl', 'userId'], (stored) => {
   if (stored.userId) userId = stored.userId;
 });
 
+try {
+  const result = chrome.storage.session.setAccessLevel({
+    accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS'
+  });
+  if (result && typeof result.catch === 'function') {
+    result.catch(() => {});
+  }
+} catch (_) {
+  // Ignore if not supported in this Chrome version.
+}
+
 // ── Message Router ─────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case 'TEACH_START':
       teachState = { sessionId: msg.sessionId, workflowName: msg.workflowName };
       chrome.storage.session.set({ teachState });
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs?.[0];
-        if (activeTab?.id) {
-          sendTabMessageSafe(activeTab.id, { type: 'TEACH_MODE_ON' });
-        }
-      });
+      broadcastTeachModeOn();
+      // Retry once in case the tab was still loading when TEACH_START fired.
+      setTimeout(broadcastTeachModeOn, 350);
       sendResponse({ ok: true });
       break;
 
@@ -82,6 +90,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: 'Unknown message type' });
   }
   return true; // keep channel open for async responses
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!teachState) return;
+  if (changeInfo.status === 'complete') {
+    sendTabMessageSafe(tabId, { type: 'TEACH_MODE_ON' });
+  }
 });
 
 // ── TEACH: handle click from content.js ───────────────────────
@@ -291,4 +306,14 @@ function sendTabMessageSafe(tabId, message) {
   } catch (_) {
     // The target tab may not have a content script attached yet.
   }
+}
+
+function broadcastTeachModeOn() {
+  chrome.tabs.query({ currentWindow: true }, (tabs) => {
+    tabs.forEach((tab) => {
+      if (tab.id) {
+        sendTabMessageSafe(tab.id, { type: 'TEACH_MODE_ON' });
+      }
+    });
+  });
 }
