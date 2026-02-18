@@ -21,12 +21,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'TEACH_START':
       teachState = { sessionId: msg.sessionId, workflowName: msg.workflowName };
       chrome.storage.session.set({ teachState });
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const activeTab = tabs?.[0];
+        if (activeTab?.id) {
+          sendTabMessageSafe(activeTab.id, { type: 'TEACH_MODE_ON' });
+        }
+      });
       sendResponse({ ok: true });
       break;
 
     case 'TEACH_STOP':
       teachState = null;
       chrome.storage.session.remove('teachState');
+      chrome.tabs.query({ currentWindow: true }, (tabs) => {
+        tabs.forEach((tab) => {
+          if (tab.id) {
+            sendTabMessageSafe(tab.id, { type: 'TEACH_MODE_OFF' });
+          }
+        });
+      });
       sendResponse({ ok: true });
       break;
 
@@ -204,11 +217,23 @@ async function runExecuteLoop() {
 }
 
 async function handleRecovery(executionId, stepIndex, resolution) {
+  let screenshotB64 = null;
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab) {
+      const dataUrl = await chrome.tabs.captureVisibleTab(activeTab.windowId, { format: 'png' });
+      screenshotB64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+    }
+  } catch (err) {
+    console.warn('[USERS] recovery screenshot capture failed', err);
+  }
+
   try {
     await apiFetch('/execute/recover', 'POST', {
       execution_id: executionId,
       step_index: stepIndex,
-      resolution
+      resolution,
+      screenshot_b64: screenshotB64
     });
   } catch (err) {
     console.error('[USERS] /execute/recover error', err);
@@ -255,4 +280,15 @@ function notifyPopup(msg) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function sendTabMessageSafe(tabId, message) {
+  try {
+    const result = chrome.tabs.sendMessage(tabId, message);
+    if (result && typeof result.catch === 'function') {
+      result.catch(() => {});
+    }
+  } catch (_) {
+    // The target tab may not have a content script attached yet.
+  }
 }

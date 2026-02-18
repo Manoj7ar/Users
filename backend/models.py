@@ -126,6 +126,7 @@ class ExecuteRecoverRequest(BaseModel):
     execution_id: str
     step_index: int
     resolution: str
+    screenshot_b64: Optional[str] = None
 
 
 class ExecuteRecoverResponse(BaseModel):

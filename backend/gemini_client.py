@@ -4,6 +4,7 @@ Uses the official google-genai Python SDK (replaces deprecated google-generative
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -150,7 +151,8 @@ async def build_step_node(
         click_context=click_context or "(no context)"
     )
 
-    response = client.models.generate_content(
+    response = await asyncio.to_thread(
+        client.models.generate_content,
         model="gemini-2.0-flash",
         contents=[
             genai_types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
@@ -183,7 +185,8 @@ async def locate_element(
         target_description=target_description,
     )
 
-    response = client.models.generate_content(
+    response = await asyncio.to_thread(
+        client.models.generate_content,
         model="gemini-2.0-flash",
         contents=[
             genai_types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
@@ -208,7 +211,8 @@ async def check_verification(
     png_bytes = decode_and_resize(screenshot_b64)
     prompt = VERIFICATION_PROMPT.format(verification_cue=verification_cue)
 
-    response = client.models.generate_content(
+    response = await asyncio.to_thread(
+        client.models.generate_content,
         model="gemini-2.0-flash",
         contents=[
             genai_types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
@@ -230,7 +234,8 @@ async def finalize_workflow(steps: list[dict]) -> dict[str, Any]:
     steps_json = json.dumps(steps, indent=2, default=str)
     prompt = FINALIZE_WORKFLOW_PROMPT.format(steps_json=steps_json)
 
-    response = client.models.generate_content(
+    response = await asyncio.to_thread(
+        client.models.generate_content,
         model="gemini-2.0-flash",
         contents=prompt,
     )

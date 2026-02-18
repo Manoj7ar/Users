@@ -51,6 +51,15 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("USERS backend starting up…")
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY environment variable is not set. "
+            "Set it in .env or as a Cloud Run env var."
+        )
+    if not project:
+        raise RuntimeError("GOOGLE_CLOUD_PROJECT environment variable is not set.")
     # Warm up Gemini model
     _ = gemini_client.get_model()
     # Warm up ADK agent
@@ -349,7 +358,7 @@ async def execute_recover(req: ExecuteRecoverRequest):
         # Re-run with the additional context from the user's resolution
         # We return a best-effort action based on the resolution text
         # In this simplified path, we trust the user's description
-        action = _resolution_to_action(req.resolution, step)
+        action = await _resolution_to_action(req.resolution, step, req.screenshot_b64)
 
         logger.info("Recovery resolved for step %d: %s", req.step_index, req.resolution)
         return ExecuteRecoverResponse(action=action)
@@ -390,18 +399,43 @@ def _parse_dt(value) -> Optional[datetime]:
         return None
 
 
-def _resolution_to_action(resolution: str, step: dict) -> ActionCommand:
+async def _resolution_to_action(
+    resolution: str,
+    step: dict,
+    screenshot_b64: Optional[str] = None,
+) -> ActionCommand:
     """
     Convert a recovery resolution string to an ActionCommand.
-    This is a best-effort heuristic — the resolution is typically
-    something like "the blue button on the left" and will be used
-    on the next /execute/step call with updated context.
-    For immediate recovery, return the step's action type with
-    default coordinates (0.5, 0.5 = center of screen).
+    If a screenshot is available, run a best-effort re-location call
+    using the user's clarification to improve click coordinates.
     """
     action_type = step.get("action_type", "click")
+    action_type = action_type if action_type in ("click", "type", "navigate", "scroll") else "click"
+
+    if screenshot_b64:
+        try:
+            enhanced_description = (
+                f"{step.get('target_description', '')}. User clarified: {resolution}"
+            ).strip()
+            location = await gemini_client.locate_element(
+                screenshot_b64=screenshot_b64,
+                step_index=step.get("step_id", 0),
+                intent=step.get("intent", ""),
+                visual_cue=resolution or step.get("visual_cue", ""),
+                target_description=enhanced_description,
+            )
+            return ActionCommand(
+                type=action_type,
+                x=float(location.get("x", 0.5)),
+                y=float(location.get("y", 0.5)),
+                value=step.get("input_value"),
+                scroll_direction=None,
+            )
+        except Exception:
+            pass
+
     return ActionCommand(
-        type=action_type if action_type in ("click", "type", "navigate", "scroll") else "click",
+        type=action_type,
         x=0.5,
         y=0.5,
         value=step.get("input_value"),

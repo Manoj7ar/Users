@@ -321,10 +321,16 @@ async def agent_execute_step(
         # Fall back to direct Gemini call
 
     # Always use direct structured Gemini call for reliable JSON output
-    return await _direct_locate_step(step, screenshot_b64, step_index, threshold)
+    return await _direct_locate_step(step, screenshot_b64, step_index, threshold, retry_context)
 
 
-async def _direct_locate_step(step: dict, screenshot_b64: str, step_index: int, threshold: float) -> dict:
+async def _direct_locate_step(
+    step: dict,
+    screenshot_b64: str,
+    step_index: int,
+    threshold: float,
+    retry_context: str = "",
+) -> dict:
     """
     Directly call Gemini to locate the element (fallback + primary path for structured output).
     """
@@ -333,6 +339,16 @@ async def _direct_locate_step(step: dict, screenshot_b64: str, step_index: int, 
     target_description = step.get("target_description", "")
     action_type = step.get("action_type", "click")
     input_value = step.get("input_value")
+    clarification = (retry_context or "").strip()
+    if clarification:
+        visual_cue = (
+            f"{visual_cue}. User clarification: {clarification}"
+            if visual_cue else clarification
+        )
+        target_description = (
+            f"{target_description}. User clarification: {clarification}"
+            if target_description else clarification
+        )
 
     try:
         location = await gemini_client.locate_element(
