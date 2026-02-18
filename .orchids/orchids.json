@@ -1,0 +1,7 @@
+{
+  "projectId": "c61e2987-dfda-45e7-bcba-18993e36e75e",
+  "createdAt": 1771405242010,
+  "version": "1.0",
+  "startupCommands": ["pip install -r backend/requirements.txt -q; cd backend && uvicorn main:app --host 0.0.0.0 --port 8080"],
+  "templateId": "any"
+}

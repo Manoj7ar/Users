@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>USERS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Syne:wght@800&family=DM+Sans:wght@300;400;500&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <!-- ── SCREEN 1: DASHBOARD ── -->
+  <div id="screen-dashboard" class="screen active">
+    <div class="dashboard-header">
+      <h1 class="app-name">USERS</h1>
+      <p class="app-subtitle">One-shot workflow automation</p>
+    </div>
+
+    <div class="workflow-list-wrapper">
+      <div id="workflow-list" class="workflow-list">
+        <!-- populated by JS -->
+      </div>
+      <div id="empty-state" class="empty-state hidden">
+        <div class="empty-icon">◇</div>
+        <p>No workflows yet.</p>
+        <p class="empty-sub">Teach USERS your first one.</p>
+      </div>
+    </div>
+
+    <div class="dashboard-footer">
+      <button id="btn-teach-new" class="btn-primary btn-full">
+        <span class="btn-icon">+</span> Teach New Workflow
+      </button>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 2: TEACH MODE ── -->
+  <div id="screen-teach" class="screen hidden">
+    <div class="screen-header">
+      <div class="header-left">
+        <button id="btn-teach-back" class="btn-back">←</button>
+        <h2 class="screen-title">TEACH MODE</h2>
+      </div>
+      <div id="rec-dot" class="rec-dot hidden"></div>
+    </div>
+
+    <div class="teach-setup" id="teach-setup">
+      <input
+        id="workflow-name-input"
+        class="input-field"
+        type="text"
+        placeholder="Workflow name..."
+        maxlength="60"
+      />
+      <button id="btn-start-recording" class="btn-primary btn-full">
+        Start Recording
+      </button>
+    </div>
+
+    <div class="teach-recording hidden" id="teach-recording">
+      <div class="step-counter">
+        Steps captured: <span id="step-count">0</span>
+      </div>
+
+      <div class="status-message" id="teach-status">
+        Listening… waiting for your next action
+      </div>
+
+      <div class="progress-bar-container">
+        <div class="progress-bar-fill" id="teach-progress"></div>
+      </div>
+
+      <div class="transcript-box" id="transcript-box">
+        <div class="transcript-label">Live transcript</div>
+        <div id="transcript-content" class="transcript-content">
+          <span class="transcript-placeholder">Start speaking…</span>
+        </div>
+      </div>
+
+      <div class="teach-actions">
+        <button id="btn-stop-save" class="btn-primary">Stop &amp; Save</button>
+        <button id="btn-teach-cancel" class="btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 3: EXECUTE MODE ── -->
+  <div id="screen-execute" class="screen hidden">
+    <div class="screen-header">
+      <div class="header-left">
+        <button id="btn-execute-back" class="btn-back">←</button>
+        <h2 class="screen-title" id="execute-title">Running…</h2>
+      </div>
+      <div class="spinner" id="execute-spinner"></div>
+    </div>
+
+    <div class="step-progress-info">
+      <span id="step-progress-label">Step 0 of 0</span>
+    </div>
+
+    <div class="segments-bar" id="segments-bar">
+      <!-- filled by JS -->
+    </div>
+
+    <div class="current-step-card" id="current-step-card">
+      <div class="current-step-label">Current step</div>
+      <div id="current-step-intent" class="current-step-intent">—</div>
+      <div id="current-step-status" class="current-step-status live-status">
+        Initializing…
+      </div>
+    </div>
+
+    <!-- RECOVERY sub-state -->
+    <div id="recovery-card" class="recovery-card hidden">
+      <div class="recovery-header">
+        <span class="recovery-icon">⚠</span>
+        <span class="recovery-title">USERS needs your help</span>
+      </div>
+      <p id="recovery-question" class="recovery-question">…</p>
+      <div id="recovery-options" class="recovery-options">
+        <!-- dynamic buttons -->
+      </div>
+      <div class="recovery-input-row">
+        <input
+          id="recovery-input"
+          class="input-field recovery-field"
+          type="text"
+          placeholder="Or describe what to do…"
+        />
+        <button id="btn-recovery-send" class="btn-primary btn-sm">Send</button>
+      </div>
+    </div>
+
+    <!-- Completed step log -->
+    <div class="steps-log" id="steps-log">
+      <!-- checkmark items added by JS -->
+    </div>
+
+    <div class="execute-footer">
+      <button id="btn-execute-stop" class="btn-danger btn-full">
+        Stop Execution
+      </button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
